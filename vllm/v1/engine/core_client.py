@@ -91,14 +91,23 @@ class EngineCoreClient(ABC):
         client_index: int = 0,
     ) -> "MPClient":
         parallel_config = vllm_config.parallel_config
+
+        # VALIDATION DEBUG: Log engine client creation details
+        logger = init_logger(__name__)
+        logger.info(f"CLIENT_CREATION DEBUG: data_parallel_size = {parallel_config.data_parallel_size}")
+        logger.info(f"CLIENT_CREATION DEBUG: data_parallel_external_lb = {parallel_config.data_parallel_external_lb}")
+
         client_args = (vllm_config, executor_class, log_stats,
                        client_addresses, client_count, client_index)
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
+                logger.info(f"CLIENT_CREATION DEBUG: Creating DPAsyncMPClient")
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
+            logger.info(f"CLIENT_CREATION DEBUG: Creating DPLBAsyncMPClient")
             return DPLBAsyncMPClient(*client_args)
+        logger.info(f"CLIENT_CREATION DEBUG: Creating AsyncMPClient")
         return AsyncMPClient(*client_args)
 
     @abstractmethod
@@ -1114,15 +1123,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                  client_count: int = 1,
                  client_index: int = 0):
 
+
         self.client_count = client_count
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
 
+        # VALIDATION: Counter for tracking requests per rank
+        self.rank_request_counters: dict[int, int] = {}
+        logger.info(f"DPLB_INIT DEBUG: Initialized rank_request_counters: {self.rank_request_counters}")
+
         super().__init__(vllm_config, executor_class, log_stats,
                          client_addresses, client_count, client_index)
 
         assert len(self.core_engines) > 1
+        logger.info(f"DPLB_INIT DEBUG: DPLBAsyncMPClient initialized with {len(self.core_engines)} core engines")
 
         self.eng_start_index = (len(self.core_engines) *
                                 self.client_index) // client_count
@@ -1152,7 +1167,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
+
+        # VALIDATION: Increment counter for the selected rank
+        if eng_index not in self.rank_request_counters:
+            self.rank_request_counters[eng_index] = 0
+        self.rank_request_counters[eng_index] += 1
+
         return chosen_engine
+
+    def get_rank_request_counters(self) -> dict[int, int]:
+        """VALIDATION: Get request counters for each rank"""
+        return self.rank_request_counters.copy()
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.

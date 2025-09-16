@@ -269,6 +269,7 @@ class AsyncLLM(EngineClient):
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
+
         if self.errored:
             raise EngineDeadError()
 
@@ -341,6 +342,7 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
+
 
         if (self.vllm_config.cache_config.kv_sharing_fast_prefill
                 and sampling_params.prompt_logprobs):

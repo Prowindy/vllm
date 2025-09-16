@@ -224,10 +224,11 @@ class EngineCore:
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
-        
+
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
