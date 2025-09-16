@@ -386,6 +386,57 @@ async def get_server_load_metrics(request: Request):
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
 
 
+@router.get("/rank_counters")
+async def get_rank_request_counters(request: Request):
+    """VALIDATION: Returns request counters for each DP rank"""
+    client = engine_client(request)
+
+    # Debug logging
+    client_type = type(client).__name__
+    client_module = type(client).__module__
+    has_method = hasattr(client, 'get_rank_request_counters')
+
+    # Log client details for debugging
+    logger.info(f"RANK_COUNTERS DEBUG: Client type: {client_type}")
+    logger.info(f"RANK_COUNTERS DEBUG: Client module: {client_module}")
+    logger.info(f"RANK_COUNTERS DEBUG: Has get_rank_request_counters method: {has_method}")
+
+    # Check all attributes of client for debugging
+    client_attrs = [attr for attr in dir(client) if 'rank' in attr.lower() or 'counter' in attr.lower()]
+    logger.info(f"RANK_COUNTERS DEBUG: Rank/counter related attributes: {client_attrs}")
+
+    # Check if this is a DP-aware client with counters
+    if hasattr(client, 'get_rank_request_counters'):
+        counters = client.get_rank_request_counters()
+        logger.info(f"RANK_COUNTERS DEBUG: Retrieved counters: {counters}")
+        return JSONResponse(content={'rank_counters': counters})
+    else:
+        return JSONResponse(content={
+            'rank_counters': {},
+            'note': 'DP-aware client not available',
+            'debug_client_type': client_type,
+            'debug_client_module': client_module,
+            'debug_has_method': has_method
+        })
+
+
+@router.get("/get_server_info")
+async def get_server_info(raw_request: Request):
+    """Returns server information including DP size for router"""
+    config = raw_request.app.state.vllm_config
+
+    # Extract dp_size from parallel_config
+    dp_size = 1  # Default value
+    if hasattr(config, 'parallel_config') and hasattr(config.parallel_config, 'data_parallel_size'):
+        dp_size = config.parallel_config.data_parallel_size
+
+    server_info = {
+        "vllm_config": str(config),
+        "dp_size": dp_size
+    }
+    return JSONResponse(content=server_info)
+
+
 @router.get("/ping", response_class=Response)
 @router.post("/ping", response_class=Response)
 async def ping(raw_request: Request) -> Response:
