@@ -356,10 +356,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    # TODO: remove apache-tvm-ffi once FlashInfer is fixed https://github.com/flashinfer-ai/flashinfer/issues/1962
-    uv pip install --system --pre apache-tvm-ffi==0.1.0b15 \
-    && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    bash <<EOF
+set -e
+# TODO: remove apache-tvm-ffi once FlashInfer is fixed https://github.com/flashinfer-ai/flashinfer/issues/1962
+uv pip install --system --pre apache-tvm-ffi==0.1.0b15
+uv pip install --system /vllm-workspace/dist/*.whl --verbose \
+    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+EOF
 
 # TODO (huydhn): Remove this once xformers is released for 2.9.0
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
