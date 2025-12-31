@@ -191,9 +191,18 @@ class FrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    enable_router_as_api_server: bool = False
+    """If set to True, vLLM will start the Rust-based router to handle HTTP
+    requests instead of the Python FastAPI server. The router communicates
+    with the vLLM engine via gRPC. This provides better performance and is
+    suitable for high-throughput production deployments."""
+    router_policy: str = "consistent_hash"
+    """Load balancing policy for the router when enable_router_as_api_server
+    is True. Options: random, round_robin, cache_aware, power_of_two,
+    consistent_hash. Default: consistent_hash."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

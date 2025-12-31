@@ -81,7 +81,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             GenerateResponse protobuf messages (streaming)
         """
         request_id = request.request_id
-        logger.info("Generate request %s received.", request_id)
+        logger.debug("Generate request %s received.", request_id)
 
         try:
             # Extract tokenized input
@@ -101,6 +101,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 stream=request.stream,
             )
 
+            # Extract data_parallel_rank if provided (for DP-aware routing)
+            data_parallel_rank = None
+            if request.HasField("data_parallel_rank"):
+                data_parallel_rank = request.data_parallel_rank
+
             # Submit to request manager and stream outputs
             arrival_time = time.time()
 
@@ -109,6 +114,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
                 arrival_time=arrival_time,
+                data_parallel_rank=data_parallel_rank,
             ):
                 # Check if client disconnected
                 if context.cancelled():
@@ -402,8 +408,8 @@ async def serve_grpc(args: argparse.Namespace):
     async_llm = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=UsageContext.OPENAI_API_SERVER,
-        enable_log_requests=not args.disable_log_requests_server,
-        disable_log_stats=args.disable_log_stats_server,
+        enable_log_requests=not getattr(args, 'disable_log_requests', False),
+        disable_log_stats=getattr(args, 'disable_log_stats', False),
     )
 
     logger.info("Model: %s", vllm_config.model_config.model)
@@ -466,9 +472,10 @@ async def serve_grpc(args: argparse.Namespace):
         await server.stop(grace=5.0)
         logger.info("gRPC server stopped")
 
-        # Shutdown AsyncLLM
-        await async_llm.shutdown()
-        logger.info("AsyncLLM engine stopped")
+        # Shutdown AsyncLLM if it was created
+        if async_llm is not None:
+            await async_llm.shutdown()
+            logger.info("AsyncLLM engine stopped")
 
         logger.info("Shutdown complete")
 

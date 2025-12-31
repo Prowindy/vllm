@@ -1000,7 +1000,15 @@ def build_app(args: Namespace) -> FastAPI:
         return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(_: Request, exc: RequestValidationError):
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        # Log the raw request body and validation error for debugging
+        try:
+            body = await request.body()
+            logger.error(f"Validation error for {request.url.path}: {exc.errors()}")
+            logger.error(f"Raw request body: {body.decode('utf-8')}")
+        except Exception as e:
+            logger.error(f"Could not log request body: {e}")
+
         exc_str = str(exc)
         errors_str = str(exc.errors())
 

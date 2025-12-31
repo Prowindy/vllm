@@ -61,6 +61,7 @@ class GrpcRequestManager:
         prompt_token_ids: list[int],
         sampling_params: SamplingParams,
         arrival_time: float,
+        data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Submit a generation request and stream outputs.
@@ -70,6 +71,7 @@ class GrpcRequestManager:
             prompt_token_ids: Pre-tokenized input from Rust router
             sampling_params: Sampling parameters (with detokenize=False!)
             arrival_time: Request arrival timestamp
+            data_parallel_rank: Optional data parallel rank for DP-aware routing
 
         Yields:
             RequestOutput objects containing token IDs (text will be empty)
@@ -83,6 +85,7 @@ class GrpcRequestManager:
                 prompt=prompt,
                 params=sampling_params,
                 arrival_time=arrival_time,
+                data_parallel_rank=data_parallel_rank,
             )
 
             collector = RequestOutputCollector(output_kind=sampling_params.output_kind)

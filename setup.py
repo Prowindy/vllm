@@ -318,6 +318,68 @@ class precompiled_build_ext(build_ext):
         return
 
 
+class router_build_command(build_ext):
+    """Custom build command that also builds the router if requested."""
+
+    def run(self) -> None:
+        # Build router if environment variable is set
+        if envs.VLLM_BUILD_ROUTER:
+            self._build_router()
+
+        # Call parent build_ext
+        super().run()
+
+    def _build_router(self) -> None:
+        """Build the vllm-router package using cargo."""
+        router_dir = os.path.join(ROOT_DIR, "router")
+
+        if not os.path.exists(router_dir):
+            logger.warning(
+                "Router directory not found at %s. Skipping router build.",
+                router_dir
+            )
+            return
+
+        logger.info("Building vllm-router from %s using cargo", router_dir)
+
+        # Check if cargo is available
+        if not which("cargo"):
+            logger.error(
+                "cargo is required to build the router. "
+                "Install Rust toolchain from https://rustup.rs/"
+            )
+            raise RuntimeError("cargo not found")
+
+        # Build router using cargo
+        try:
+            logger.info("Running: cargo build --release")
+            subprocess.check_call(
+                ["cargo", "build", "--release"],
+                cwd=router_dir,
+            )
+            logger.info("Successfully built vllm-router binary at %s/target/release/vllm-router", router_dir)
+
+            # Also install Python wrapper if possible (optional)
+            # This will fail without setuptools-rust but that's okay
+            try:
+                logger.info("Attempting to install Python wrapper...")
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "-e", ".", "--no-deps"],
+                    cwd=router_dir,
+                    stderr=subprocess.DEVNULL,
+                )
+                logger.info("Python wrapper installed successfully")
+            except subprocess.CalledProcessError:
+                logger.warning(
+                    "Could not install Python wrapper (setuptools-rust not available). "
+                    "Router binary is available but Python integration may be limited."
+                )
+
+        except subprocess.CalledProcessError as e:
+            logger.error("Failed to build vllm-router: %s", e)
+            raise
+
+
 class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
@@ -782,11 +844,25 @@ if _no_device():
 if not ext_modules:
     cmdclass = {}
 else:
-    cmdclass = {
-        "build_ext": precompiled_build_ext
-        if envs.VLLM_USE_PRECOMPILED
-        else cmake_build_ext
-    }
+    if envs.VLLM_USE_PRECOMPILED:
+        base_build_ext = precompiled_build_ext
+    else:
+        base_build_ext = cmake_build_ext
+
+    # Wrap with router_build_command if router build is requested
+    if envs.VLLM_BUILD_ROUTER:
+        # Create a new class that inherits from base_build_ext and router_build_command
+        class combined_build_ext(router_build_command, base_build_ext):
+            def run(self):
+                # First build router
+                if envs.VLLM_BUILD_ROUTER:
+                    self._build_router()
+                # Then build vllm extensions
+                base_build_ext.run(self)
+
+        cmdclass = {"build_ext": combined_build_ext}
+    else:
+        cmdclass = {"build_ext": base_build_ext}
 
 setup(
     # static metadata should rather go in pyproject.toml
@@ -807,6 +883,8 @@ setup(
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
+        # Router support
+        "router": ["setuptools-rust>=1.5.2"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
