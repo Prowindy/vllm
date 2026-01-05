@@ -3,6 +3,9 @@
 
 import argparse
 import signal
+import subprocess
+import sys
+import time
 
 import uvloop
 
@@ -50,7 +53,10 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless or args.api_server_count < 1:
+        # Check if router mode is enabled
+        if args.enable_router_as_api_server:
+            run_with_router(args)
+        elif args.headless or args.api_server_count < 1:
             run_headless(args)
         else:
             if args.api_server_count > 1:
@@ -76,6 +82,223 @@ class ServeSubcommand(CLISubcommand):
 
 def cmd_init() -> list[CLISubcommand]:
     return [ServeSubcommand()]
+
+
+def start_router_binary(args: argparse.Namespace, grpc_host: str, grpc_port: int):
+    """Start router binary directly (without Python wrapper).
+
+    Args:
+        args: CLI arguments from vllm serve
+        grpc_host: gRPC server host
+        grpc_port: gRPC server port
+
+    Returns:
+        subprocess.Popen instance for the router process
+    """
+    import os
+
+    # Find router binary
+    vllm_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    router_binary = os.path.join(vllm_root, "router", "target", "release", "vllm-router")
+
+    if not os.path.exists(router_binary):
+        raise RuntimeError(
+            f"Router binary not found at {router_binary}. "
+            f"Build it with: cd {os.path.join(vllm_root, 'router')} && cargo build --release"
+        )
+
+    # Build router command
+    router_host = args.host or "0.0.0.0"
+    router_port = args.port or 8000
+    worker_url = f"grpc://{grpc_host}:{grpc_port}"  # Use grpc:// scheme for gRPC mode
+
+    # Get router policy from args, default to consistent_hash
+    router_policy = getattr(args, "router_policy", "consistent_hash")
+
+    router_cmd = [
+        router_binary,
+        "--worker-urls", worker_url,
+        "--host", router_host,
+        "--port", str(router_port),
+        "--policy", router_policy,
+        # Set to 0 for unlimited concurrent requests (disables rate limiting).
+        # Note: gRPC HTTP/2 connection can handle high concurrency.
+        "--max-concurrent-requests", "0",
+    ]
+
+    # Add intra-node data parallel size if specified
+    if hasattr(args, "data_parallel_size") and args.data_parallel_size:
+        router_cmd.extend(["--intra-node-data-parallel-size", str(args.data_parallel_size)])
+
+    # Add model path if available
+    if hasattr(args, "model") and args.model:
+        router_cmd.extend(["--model-path", args.model])
+
+    logger.info("Starting router: %s", " ".join(router_cmd))
+
+    # Start router process - don't pipe output so logs appear in same console
+    # Pass HF_TOKEN environment variable if set
+    router_env = os.environ.copy()
+
+    # Set default logging level to info
+    if "RUST_LOG" not in router_env:
+        router_env["RUST_LOG"] = "info"
+
+    if "HF_TOKEN" in os.environ:
+        router_env["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    elif "HUGGING_FACE_HUB_TOKEN" in os.environ:
+        router_env["HF_TOKEN"] = os.environ["HUGGING_FACE_HUB_TOKEN"]
+
+    router_process = subprocess.Popen(
+        router_cmd,
+        stdout=None,  # Inherit parent's stdout
+        stderr=None,  # Inherit parent's stderr
+        env=router_env,
+    )
+
+    # Wait a bit for router to start
+    time.sleep(2)
+
+    if router_process.poll() is not None:
+        # Process died
+        raise RuntimeError(
+            f"Router failed to start (exit code: {router_process.returncode}). "
+            "Check the logs above for error details."
+        )
+
+    logger.info("Router started successfully on http://%s:%d", router_host, router_port)
+
+    return router_process
+
+
+def run_with_router(args: argparse.Namespace):
+    """Run vLLM in localhost mode with router as API server.
+
+    In this mode:
+    - Router (Rust) handles all HTTP API requests on --port
+    - vLLM engine runs gRPC server for inference (internal on port 50051)
+    - Router communicates with engine via gRPC
+    """
+    router_port = args.port or 8000
+    logger.info(
+        "Starting vLLM in router mode: "
+        "Router on port %d, gRPC inference on port 50051",
+        router_port
+    )
+
+    # Validate configuration
+    if args.api_server_count > 1:
+        raise ValueError(
+            "--enable-router-as-api-server is incompatible with --api-server-count > 1. "
+            "Use router mode for single-node deployments only."
+        )
+
+    if args.headless:
+        raise ValueError(
+            "--enable-router-as-api-server is incompatible with --headless. "
+            "For multi-node deployments, run router separately."
+        )
+
+    # Set up signal handlers for graceful shutdown
+    router_process = None
+    grpc_server_process = None
+    shutdown_requested = False
+
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        logger.info("Received signal %d, initiating graceful shutdown...", signum)
+        shutdown_requested = True
+
+        # Stop router
+        if router_process and router_process.poll() is None:
+            logger.info("Stopping router...")
+            router_process.terminate()
+            try:
+                router_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                router_process.kill()
+
+        # Stop gRPC server
+        if grpc_server_process and grpc_server_process.is_alive():
+            logger.info("Stopping gRPC server...")
+            grpc_server_process.terminate()
+            grpc_server_process.join(timeout=10)
+
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        # Start gRPC server in a subprocess
+        import multiprocessing
+        from vllm.entrypoints.grpc_server import serve_grpc
+
+        # Configure gRPC server on internal port
+        grpc_host = "localhost"  # Use localhost to match system's IPv4/IPv6 preference
+        grpc_port = 50051
+
+        logger.info(
+            "Starting gRPC server on %s:%d", grpc_host, grpc_port
+        )
+
+        # Function to run gRPC server in subprocess
+        def run_grpc_in_subprocess():
+            # Clone args for gRPC server
+            import copy
+            grpc_args = copy.deepcopy(args)
+            grpc_args.host = grpc_host
+            grpc_args.port = grpc_port
+            # Run the async serve_grpc function
+            import asyncio
+            asyncio.run(serve_grpc(grpc_args))
+
+        grpc_server_process = multiprocessing.Process(
+            target=run_grpc_in_subprocess,
+            name="vllm-grpc-server",
+        )
+        grpc_server_process.start()
+
+        # Wait a bit for gRPC server to start
+        time.sleep(3)
+
+        if not grpc_server_process.is_alive():
+            raise RuntimeError("gRPC server failed to start")
+
+        logger.info("gRPC server started successfully")
+
+        # Start router on --port
+        router_process = start_router_binary(args, grpc_host, grpc_port)
+
+        # Keep the main process alive and monitor subprocesses
+        while not shutdown_requested:
+            time.sleep(1)
+
+            # Check if subprocesses are still alive
+            if not grpc_server_process.is_alive():
+                logger.error("gRPC server died unexpectedly")
+                break
+
+            if router_process.poll() is not None:
+                logger.error("Router died unexpectedly")
+                break
+
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received, shutting down...")
+    except Exception as e:
+        logger.error("Error in router mode: %s", e)
+        raise
+    finally:
+        # Clean up processes
+        if router_process and router_process.poll() is None:
+            router_process.terminate()
+            try:
+                router_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                router_process.kill()
+        if grpc_server_process and grpc_server_process.is_alive():
+            grpc_server_process.terminate()
+            grpc_server_process.join()
 
 
 def run_headless(args: argparse.Namespace):

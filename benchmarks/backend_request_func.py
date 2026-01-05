@@ -8,6 +8,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import aiohttp
 import huggingface_hub.constants
@@ -419,6 +420,8 @@ async def async_request_openai_chat_completions(
         ttft = 0.0
         st = time.perf_counter()
         most_recent_timestamp = st
+        request_id = payload.get("request_id", "unknown")
+        print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] REQUEST_START: {request_id}", flush=True)
         try:
             async with session.post(
                 url=api_url, json=payload, headers=headers
@@ -460,6 +463,7 @@ async def async_request_openai_chat_completions(
                     output.generated_text = generated_text
                     output.success = True
                     output.latency = most_recent_timestamp - st
+                    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] REQUEST_END: {request_id} latency={output.latency:.3f}s", flush=True)
                 else:
                     output.error = response.reason or ""
                     output.success = False

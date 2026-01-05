@@ -1189,6 +1189,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
 
+        # HACK: Round-robin counter for load balancing
+        self.rr_counter = 0
+
         super().__init__(
             vllm_config,
             executor_class,
@@ -1207,22 +1210,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None:
+            # HACK: Using simple round-robin instead of weighted least-load
+            # for performance comparison. Original algorithm:
+            # for i in range(num_engines):
+            #     idx = (self.eng_start_index + i) % num_engines
+            #     waiting, running = current_counts[idx]
+            #     score = waiting * 4 + running
+            #     if score < min_score:
+            #         min_score = score
+            #         eng_index = idx
+            num_engines = len(self.core_engines)
+            eng_index = self.rr_counter % num_engines
+            self.rr_counter += 1
+
+            # Keep the local count update for compatibility
             current_counts = self.lb_engines
-            # TODO use P2C alg for larger DP sizes
-            num_engines = len(current_counts)
-            min_score = sys.maxsize
-            eng_index = 0
-            for i in range(num_engines):
-                # Start from client_index to help with balancing when engines
-                # are empty.
-                idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
-                score = waiting * 4 + running
-                if score < min_score:
-                    min_score = score
-                    eng_index = idx
-            # Increment local waiting count for better balancing between stats
-            # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
 
         chosen_engine = self.core_engines[eng_index]

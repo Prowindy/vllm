@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_BUILD_ROUTER: bool = False
     VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
@@ -482,6 +483,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vllm will print verbose logs during installation
     "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    # If set, vllm will also build and install the router package
+    "VLLM_BUILD_ROUTER": lambda: os.environ.get("VLLM_BUILD_ROUTER", "")
+    .strip()
+    .lower()
+    in ("1", "true"),
     # Root directory for vLLM configuration files
     # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
     # Note that this not only affects how vllm finds its configuration files
